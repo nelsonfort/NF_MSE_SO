@@ -82,6 +82,8 @@
 #define ERR_OS_SCHEDULING		-2
 #define ERR_OS_DELAY_FROM_ISR	-3
 #define ERR_OS_VAL_PRIO_TASK    -4
+#define IDLE_NOT_READY_OR_RUN   -5
+#define TASK_PRIO_CNT_OVERFL	-6
 
 #define WARN_OS_QUEUE_FULL_ISR	-100
 #define WARN_OS_QUEUE_EMPTY_ISR	-101
@@ -140,10 +142,22 @@ typedef struct _tarea tarea;
  * Definicion de la estructura de control para el sistema operativo
  *******************************************************************************/
 struct _osControl  {
-	void *listaTareas[MAX_TASK_COUNT];			//array de punteros a tareas
+	tarea *listaTareas[MAX_TASK_COUNT];			//array de punteros a tareas
 	int32_t error;								//variable que contiene el ultimo error generado
 	uint8_t cantidad_Tareas;					//cantidad de tareas definidas por el usuario
 	uint8_t cantTareas_prioridad[PRIORITY_COUNT];	//cada posicion contiene cuantas tareas tienen la misma prioridad
+
+	tarea *arr_priority[4][8];						//-- Arreglo de punteros a tarea de:
+													//-- filas = cantidad de prioridades
+													//-- Columnas = cantidad de tareas.
+	uint16_t reg_priorityCnt;						//-- Registro que posee los 4 contadores que indican cuantas
+													//-- tareas hay en cada prioridad.
+	uint16_t index_tasks;							//-- Registro de indices que posee 4 indices e indican la
+													//-- posiciòn siguiente de la tarea que debe ser analizada
+													//-- para determinar si debe ser ejecutada o no y así cumplir
+													//-- con la caracterìstica de Round Robin.
+
+
 
 	estadoOS estado_sistema;					//Informacion sobre el estado del OS
 	bool cambioContextoNecesario;

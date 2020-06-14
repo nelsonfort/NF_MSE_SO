@@ -60,7 +60,7 @@ void os_Delay(uint32_t ticks)  {
 
 		while (tarea_actual->ticks_bloqueada > 0)  {
 			tarea_actual->estado = TAREA_BLOCKED;
-			os_setRegBlocked((1<<(tarea_actual->id-1)) | os_getRegBlocked());
+			os_setRegBlocked((1<<(tarea_actual->id)) | os_getRegBlocked());
 			os_CpuYield();
 		}
 	}

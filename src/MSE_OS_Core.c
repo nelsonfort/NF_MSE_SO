@@ -215,6 +215,8 @@ void os_InitTarea(void *entryPoint, tarea *task, uint8_t prioridad)  {
 	 *  @return     None.
 ***************************************************************************************************/
 void os_Init(void)  {
+	uint8_t i,j,prio;
+
 	/*
 	 * Todas las interrupciones tienen prioridad 0 (la maxima) al iniciar la ejecucion. Para que
 	 * no se de la condicion de fault mencionada en la teoria, debemos bajar su prioridad en el
@@ -239,18 +241,65 @@ void os_Init(void)  {
 	control_OS.tarea_siguiente = NULL;
 	control_OS.reg_blocked = 0;
 
-	/*
-	 * El vector de tareas termina de inicializarse asignando NULL a las posiciones que estan
-	 * luego de la ultima tarea. Esta situacion se da cuando se definen menos de 8 tareas.
-	 * Estrictamente no existe necesidad de esto, solo es por seguridad.
-	 */
+	//-- Contadores y registros de ìndices inicializados en 0;
+	control_OS.reg_priorityCnt = 0;
+	control_OS.index_tasks = 0xFFFF;
+	//-- Inicializamos el arreglo de prioridades con todos los punteros en NULL
+	for(i=0;i<= MIN_PRIORITY; i++){
+		for(j=0; j<MAX_TASK_COUNT; j++){
+			control_OS.arr_priority[i][j] = NULL;
+		}
+	}
 
-	for (uint8_t i = 0; i < MAX_TASK_COUNT; i++)  {
+	//--  El vector de tareas termina de inicializarse asignando NULL a las posiciones que estan
+	//-- luego de la ultima tarea. Esta situacion se da cuando se definen menos de 8 tareas.
+	//--  Estrictamente no existe necesidad de esto, solo es por seguridad.
+
+
+	for ( i = 0; i < MAX_TASK_COUNT; i++)  {
 		if(i>=control_OS.cantidad_Tareas)
 			control_OS.listaTareas[i] = NULL;
 	}
 
-	ordenarPrioridades();
+	//------------------------Ordenamiento de tareas segun prioridades----------------------------------
+	//-- Las tareas se ordenan en un arreglo de punteros a tareas de 4 filas y 8 columnas.
+	//-- Las 4 filas determinan el orden de prioridad de las tareas siendo la fila 0 de mayor prioridad
+	//-- y la fila 3 la de menor prioridad (excluyendo task_IDLE que tiene una prioridad aún menor ).
+	//-- Las columnas determinan la cantidad de tareas que se pueden poner en cada nivel de prioridad y
+	//-- coincide con el limite de tareas estipulado como requerimiento.
+	//-- Además se incorpora un registro contador de 16bits que posee internamente la cantidad de tareas
+	//-- que se encuentran en cada prioridad. Si el contador es 0 no hay ninguna tarea en ese nivel de
+	//-- prioridad. Los valores de 1 a 8 indica la cantidad de tareas.
+	//-- La estructura de este registro es la siguiente:
+	//--      -----------------------------------------------------------------------------
+	//--      | cont_prioridad_3 | cont_prioridad_2 | cont_prioridad_1 | cont_prioridad_0 | <--- Reg contador
+	//--      -------4bits--------------4bits---------------4bits-------------4bits--------      (uint16_t)
+
+	for(i=0;i<control_OS.cantidad_Tareas;i++){
+		prio = control_OS.listaTareas[i]->prioridad;
+
+		if(prio > 3)
+			os_setError(ERR_OS_VAL_PRIO_TASK , os_Init);
+		else
+		{
+			// Contador: obtengo el valor del contador y verifico que no supere el valor 8
+			if ( ((  control_OS.reg_priorityCnt & (0x000F<<(prio*4))  ) >>(prio*4)) > 8)
+				os_setError(TASK_PRIO_CNT_OVERFL,os_Init);
+			else
+			{
+				//Ingreso tarea
+				control_OS.arr_priority[prio][(control_OS.reg_priorityCnt & (0x000F<<(prio*4))) >>(prio*4)] = control_OS.listaTareas[i];
+
+				//incremento contador correspondiente
+				control_OS.reg_priorityCnt += (1<<(prio*4));
+			}
+		}
+
+
+	}
+
+
+	//ordenarPrioridades();
 }
 
 
@@ -319,56 +368,27 @@ static void initTareaIdle(void)  {
 	 *  @return     None.
 ***************************************************************************************************/
 static void scheduler(void)  {
-	static uint8_t indicePrioridad[PRIORITY_COUNT];		//indice de tareas a ejecutar segun prioridad
-	uint8_t indiceArrayTareas = 0;
-	uint8_t prioridad_actual = MAX_PRIORITY;			//Maxima prioridad al iniciar
-	uint8_t cantBloqueadas_prioActual = 0;
-	bool salir = false;
-	uint8_t cant_bloqueadas = 0;
-	estadoOS estado_anterior;
+	//-- Declaraciones
+	uint8_t i,j, contador, indice, prioridad_actual;
 
 
-	/*
-	 * El scheduler recibe la informacion desde la variable estado_sistema si es el primer ingreso
-	 * desde el ultimo reset. Si esto es asi, se carga como tarea actual la tarea idle. Esto es
-	 * mas prolijo que tener una bandera para cada situacion.
-	 * Es necesario que el vector que lleva los indices de las tareas este a cero antes de comenzar
-	 * lo que se logra con la funcion memset()
-	 */
-	if (control_OS.estado_sistema == OS_FROM_RESET)  {
+	//-- Planificador inicial
+	if(control_OS.estado_sistema == OS_FROM_RESET){
 		control_OS.tarea_actual = (tarea*) &tareaIdle;
-		memset(indicePrioridad,0,sizeof(uint8_t) * PRIORITY_COUNT);
 		control_OS.estado_sistema = OS_NORMAL_RUN;
 	}
 
-	/*
-	 * Se comienza a iterar sobre el vector de tareas, pero teniendo en cuenta las
-	 * prioridades de las tareas.
-	 * En esta implementacion, durante la ejecucion de os_Init() se aplica la
-	 * tecnica de quicksort sobre el vector que contiene la lista de tareas
-	 * y se ordenan los punteros a tareas segun la prioridad que tengan. Los
-	 * punteros a tareas quedan ordenados de mayor a menor prioridad.
-	 * Gracias a eso, dividiendo el vector de punteros en cuantas prioridades haya
-	 * podemos recorrer estas subsecciones manteniendo indices para cada prioridad
-	 *
-	 * La mecanica de RoundRobin para tareas de igual prioridad se mantiene,
-	 * asimismo la determinacion de cuando la tarea idle debe ser ejecutada. Cuando
-	 * se recorren todas las tareas de una prioridad y todas estan bloqueadas, entonces
-	 * se pasa a la prioridad menor siguiente
-	 *
-	 * Recordar que aunque todas las tareas definidas por el usuario esten bloqueadas
-	 * la tarea Idle solamente puede tomar estados READY y RUNNING.
-	 */
+	//-- La tarea Idle solamente puede tomar estados READY y RUNNING.
+	//-- Por lo cual se verifica su estado y en caso de no ser alguno de ellos
+	//-- se indica el error correspondiente.
+	if((tareaIdle.estado != TAREA_RUNNING) && (tareaIdle.estado != TAREA_READY) ){
+		os_setError(IDLE_NOT_READY_OR_RUN,scheduler);
+	}
 
 
-	/*
-	 * Puede darse el caso en que se haya invocado la funcion os_CpuYield() la cual hace una
-	 * llamada al scheduler. Si durante la ejecucion del scheduler (la cual fue forzada) y
-	 * esta siendo atendida en modo Thread ocurre una excepcion dada por el SysTick, habra una
-	 * instancia del scheduler pendiente en modo trhead y otra corriendo en modo Handler invocada
-	 * por el SysTick. Para evitar un doble scheduling, se controla que el sistema no este haciendo
-	 * uno ya. En caso afirmativo se vuelve prematuramente
-	 */
+	//-- En el caso de que el scheduler esté siendo ejecutado debido a una situación externa
+	//-- al systick puede provocar que se vuelva a llamar si justo el systick_handler fue
+	//-- activado. Para evitar una nueva planificación, se ignora la última sucedida.
 	if (control_OS.estado_sistema == OS_SCHEDULING)  {
 		return;
 	}
@@ -379,107 +399,129 @@ static void scheduler(void)  {
 	 */
 	control_OS.estado_sistema = OS_SCHEDULING;
 
-	/*
-	 * Como la determinacion de cuantas funciones estan en READY o BLOCKED es dinamica,
-	 * se hace un bucle con un testigo para salir de el
-	 */
-	while(!salir)  {
 
-		/*
-		 * La variable indiceArrayTareas contiene la posicion real dentro del array listaTareas
-		 * de la tarea siguiente a ser ejecutada. Se inicializa en 0
-		 */
-		indiceArrayTareas = 0;
+	//-- Planificador en tiempo de ejecución
 
-		/*
-		 * Puede darse el caso de que se hayan definido tareas de prioridades no contiguas, por
-		 * ejemplo dos tareas de maxima prioridad y una de minima prioridad. Quiere decir que no
-		 * existen tareas con prioridades entre estas dos. Este bloque if determina si existen
-		 * funciones para la prioridad actual. Si no existen, se pasa a la prioridad menor
-		 * siguiente
-		 */
-		if(control_OS.cantTareas_prioridad[prioridad_actual] > 0)  {
+	//-- Tarea siguiente es NULL hasta que se determine lo contrario
+	control_OS.tarea_siguiente = NULL;
+	if(control_OS.tarea_actual->estado != TAREA_BLOCKED){
+		//-- Si la tarea que se encontraba actualmente en ejecución está
+		//-- bloqueada, se debe elegir dentro del planificador cualquiera
+		//-- de las tareas que se encuentre en READY siguiendo el orden
+		//-- de prioridades y la posición actual del índice que ejecuta el
+		//-- round robin.
+		prioridad_actual = control_OS.tarea_actual->prioridad;
 
-			/*
-			 * esta linea asegura que el indice siempre este dentro de los limites de la subseccion
-			 * que forman los punteros a las tareas de prioridad actual
-			 */
-			indicePrioridad[prioridad_actual] %= control_OS.cantTareas_prioridad[prioridad_actual];
+	}
+	else{
+		//-- La tarea actual se encuentra actualmente bloqueada por lo cual
+		//-- no solo se buscan tareas de prioridad superior o igual que se
+		//-- encuentran en READY, sino que se agregan las tareas de menor
+		//-- prioridad también.
+		prioridad_actual = MIN_PRIORITY;
+	}
 
-			/*
-			 * El bucle for hace una conversion de indices de subsecciones al indice real que debe
-			 * usarse sobre el vector de punteros a tareas. Cuando se baja de prioridad debe sumarse
-			 * el total de tareas que existen en la subseccion anterior. Recordar que el vector de
-			 * tareas esta ordenado de mayor a menor
-			 */
-			for (int i=0; i<prioridad_actual;i++) {
-				indiceArrayTareas += control_OS.cantTareas_prioridad[i];
+	//-- Si  viene de task idle se ajusta la prioridad para mantener concordancia
+	//-- en el for que se encarga de buscar nuevas tareas en estado READY.
+	if(prioridad_actual > MIN_PRIORITY){
+		prioridad_actual = MIN_PRIORITY;
+	}
+
+	//--  Se recorre la matriz de prioridades de tareas
+	//-- para ver si existe una tarea que necesite ser atendida.
+	//-- Sólo se planifica para tareas iguales o mayores a la especificada en
+	//-- prioridad_actual.
+	for(i=0;i<=prioridad_actual;i++){
+		//-- Solo verifican las tareas de una determinada prioridad si el contador es distinto de 0,
+		//-- es decir, si hay tareas dentro de esa prioridad que necesiten ser evaluadas.
+		contador = ( control_OS.reg_priorityCnt & ( 0xF << (i*4) ) ) >> (i*4);
+
+		if(contador != 0){
+			//-- determina el indice pròximo a ejecutar.
+
+			indice   = ( control_OS.index_tasks & ( 0xF << (i*4) ) ) >> (i*4);
+
+			//-- Determino si hay alguna tarea que requiera uso del cpu
+			//-- si indice es mayor o igual a contador quiere decir que se pasó de rango y corresponde
+			//-- verificar el estado de la tarea en la posiciòn cero.
+			//-- recordar que contador indica la cantidad de tareas y no la posicion dentro del vector.
+			if(indice >= contador){
+				indice = 0;
 			}
-			indiceArrayTareas += indicePrioridad[prioridad_actual];
+			//-- Comienza el cursor (indice) en la pròxima tarea que deberìa ejecutarse.
+			//-- hasta indice+contador
+			//-- En el caso de que  J sea mayor o igual a contador, a J se le decrementa contador
+			//-- para que indice comience nuevemente desde 0 y poder verificar si alguna de todas
+			//-- las tareas se encuentra en estado ready.
 
+			for(j=indice;j<indice+contador;j++){
+				//-- verificamos el valor del indice para determinar cual es la proxima tarea en el round robin
+				if(j<contador){
+					if(control_OS.arr_priority[i][j]->estado == TAREA_READY){
+						//-- Se asigna la tarea siguiente
+						control_OS.tarea_siguiente = control_OS.arr_priority[i][j];
 
-
-
-			switch (((tarea*)control_OS.listaTareas[indiceArrayTareas])->estado) {
-
-			case TAREA_READY:
-				control_OS.tarea_siguiente = (tarea*) control_OS.listaTareas[indiceArrayTareas];
-				control_OS.cambioContextoNecesario = true;
-				indicePrioridad[prioridad_actual]++;
-				salir = true;
-				break;
-
-				/*
-				 * Para el caso de las tareas bloqueadas, la variable cantBloqueadas_prioActual se utiliza
-				 * para hacer el seguimiento de si se debe bajar un escalon de prioridad
-				 * El bucle del scheduler se ejecuta completo, pasando por todas las prioridades cada vez
-				 * hasta que encuentra una tarea en READY.
-				 * La determinacion de la necesidad de ejecucion de la tarea idle sigue siendo la misma.
-				 */
-			case TAREA_BLOCKED:
-				cant_bloqueadas++;
-				cantBloqueadas_prioActual++;
-				indicePrioridad[prioridad_actual]++;
-				if (cant_bloqueadas == control_OS.cantidad_Tareas)  {
-					control_OS.tarea_siguiente = &tareaIdle;
-					control_OS.cambioContextoNecesario = true;
-					salir = true;
-				}
-				else {
-					if(cantBloqueadas_prioActual == control_OS.cantTareas_prioridad[prioridad_actual])  {
-						cantBloqueadas_prioActual = 0;
-						indicePrioridad[prioridad_actual] = 0;
-						prioridad_actual++;
+						//-- nuevo indice = valor de j
+						//-- primero se borran los 4 bits que corresponden al indice de la actual
+						//-- prioridad
+						control_OS.index_tasks = (~(0xF<<(i*4))) & control_OS.index_tasks;
+						//-- Ahora en el area borrada se almacena el nuevo valor que corresponde al siguiente indice
+						//-- de tarea, haciendo uso del OR bit a bit.
+						control_OS.index_tasks = ((j+1) << (i*4)) | control_OS.index_tasks;
+						break; //-- Termina el ejecución del for "j"
 					}
 				}
-				break;
+				else{
+					//-- si es mayor o igual se resta contador al evaluar la matriz en j.
+					if(control_OS.arr_priority[i][j-contador]->estado == TAREA_READY){
+						//-- Se asigna la tarea siguiente
+						control_OS.tarea_siguiente = control_OS.arr_priority[i][j-contador];
 
-				/*
-				 * El unico caso que la siguiente tarea este en estado RUNNING es que
-				 * todas las demas tareas excepto la tarea corriendo actualmente esten en
-				 * estado BLOCKED, con lo que un cambio de contexto no es necesario, porque
-				 * se sigue ejecutando la misma tarea
-				 */
-			case TAREA_RUNNING:
-				indicePrioridad[prioridad_actual]++;
-				control_OS.cambioContextoNecesario = false;
-				salir = true;
-				break;
+						//-- nuevo indice = valor de j
+						//-- primero se borran los 4 bits que corresponden al indice de la actual
+						//-- prioridad
+						control_OS.index_tasks = (~(0xF<<(i*4))) & control_OS.index_tasks;
+						//-- Ahora en el area borrada se almacena el nuevo valor que corresponde al siguiente indice
+						//-- de tarea, haciendo uso del OR bit a bit.
+						control_OS.index_tasks = ((j-contador+1) << (i*4)) | control_OS.index_tasks;
+						break; //-- Termina el ejecución del for "j"
+					}
+				}
 
-				/*
-				 * En el caso que lleguemos al caso default, la tarea tomo un estado
-				 * el cual es invalido, por lo que directamente se levanta un error de
-				 * sistema actualizando la variable de ultimo error
-				 */
-			default:
-				os_setError(ERR_OS_SCHEDULING,scheduler);
+			}
+			//Si se encontrò una nueva tarea siguiente deber cortar el planificador
+			if(control_OS.tarea_siguiente != NULL){
+				break; //-- Termina el ejecución del for "i"
 			}
 		}
-		else {
-			indicePrioridad[prioridad_actual] = 0;
-			prioridad_actual++;
-		}
 	}
+	//-- Si tarea siguiente es igual a NULL no se pudo encontrar una tarea que ejecutar en este momento
+	if(control_OS.tarea_siguiente == NULL){
+		//-- Pueden darse dos situaciones:
+		if(control_OS.tarea_actual->estado == TAREA_BLOCKED){
+			//-- si la tarea_actual se encuentra bloqueada, debemos poner a
+			//-- task_IDLE como siguiente tarea.
+			control_OS.tarea_siguiente = &tareaIdle;
+
+			//-- activamos el cambio de contexto
+			control_OS.cambioContextoNecesario = true;
+
+		}
+		else{
+			//-- La otra condición que puede suceder que es la tarea_actual se encuentre actualmente corriendo
+			//-- por lo cual en esta situación no se requiere cambio de contexto.
+
+			control_OS.cambioContextoNecesario = false;
+		}
+
+	}
+	else{
+		//-- Si la tarea_siguiente no es igual a NULL es necesario el cambio de contexto por lo cual se setea
+		//-- dicha variable
+
+		control_OS.cambioContextoNecesario = true;
+	}
+
 
 	/*
 	 * Antes de salir del scheduler se devuelve el sistema a su estado normal
@@ -494,7 +536,6 @@ static void scheduler(void)  {
 	if(control_OS.cambioContextoNecesario)
 		setPendSV();
 }
-
 
 /*************************************************************************************************
 	 *  @brief SysTick Handler.

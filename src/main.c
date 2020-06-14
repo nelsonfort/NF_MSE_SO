@@ -9,6 +9,8 @@
 #include "board.h"
 #include "sapi.h"
 
+// Problema de compilaciòn
+// Agregar estas linker flags para que compile correctamente -specs=nano.specs -specs=nosys.specs
 
 /*==================[macros and definitions]=================================*/
 
@@ -148,7 +150,7 @@ int main(void)  {
 	os_InitTarea(apagarLed, &g_sApagarLed,PRIORIDAD_0);
 	os_InitTarea(uart, &g_sUart,PRIORIDAD_3);
 	os_InitTarea(blink, &g_sBlink,PRIORIDAD_2);
-	os_InitTarea(blink, &g_sBlink,4);
+	//os_InitTarea(blink, &g_sBlink,4);  //-- Prueba de error de prioridad
 	os_ColaInit(&colaUart,sizeof(char));
 	os_SemaforoInit(&semTecla1_ascendente);
 	os_SemaforoInit(&semTecla1_descendente);
