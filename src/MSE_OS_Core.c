@@ -135,9 +135,9 @@ void __attribute__((weak)) idleTask(void)  {
 	 *  @param *entryPoint		Puntero a la tarea que se desea inicializar.
 	 *  @param *task			Puntero a la estructura de control que sera utilizada para
 	 *  						la tarea que se esta inicializando.
-	 *  @return     None.
+	 *  @return     id			Para ser utilizada al suspender o reanudar una tarea dada.
 ***************************************************************************************************/
-void os_InitTarea(void *entryPoint, tarea *task, uint8_t prioridad)  {
+uint8_t os_InitTarea(void *entryPoint, tarea *task, uint8_t prioridad)  {
 	static uint8_t id = 0;				//el id sera correlativo a medida que se generen mas tareas
 
 	/*
@@ -199,6 +199,7 @@ void os_InitTarea(void *entryPoint, tarea *task, uint8_t prioridad)  {
 		 */
 		os_setError(ERR_OS_CANT_TAREAS,os_InitTarea);
 	}
+	return id;
 }
 
 
@@ -397,7 +398,7 @@ static void scheduler(void)  {
 
 	//-- Tarea siguiente es NULL hasta que se determine lo contrario
 	control_OS.tarea_siguiente = NULL;
-	if(control_OS.tarea_actual->estado != TAREA_BLOCKED){
+	if((control_OS.tarea_actual->estado != TAREA_BLOCKED)||(control_OS.tarea_actual->estado != TAREA_SUSPENDED)){
 		//-- Si la tarea que se encontraba actualmente en ejecución está
 		//-- bloqueada, se debe elegir dentro del planificador cualquiera
 		//-- de las tareas que se encuentre en READY siguiendo el orden
@@ -493,8 +494,8 @@ static void scheduler(void)  {
 	//-- Si tarea siguiente es igual a NULL no se pudo encontrar una tarea que ejecutar en este momento
 	if(control_OS.tarea_siguiente == NULL){
 		//-- Pueden darse dos situaciones:
-		if(control_OS.tarea_actual->estado == TAREA_BLOCKED){
-			//-- si la tarea_actual se encuentra bloqueada, debemos poner a
+		if((control_OS.tarea_actual->estado == TAREA_BLOCKED)||(control_OS.tarea_actual->estado == TAREA_SUSPENDED)){
+			//-- si la tarea_actual se encuentra bloqueada o suspendida, debemos poner a
 			//-- task_IDLE como siguiente tarea.
 			control_OS.tarea_siguiente = &tareaIdle;
 
@@ -560,16 +561,17 @@ void SysTick_Handler(void)  {
 			//--
 			if ( ((1<<i) & control_OS.reg_blocked) == (1<<i)){
 				task = (tarea*)control_OS.listaTareas[i];
+				if(task->estado != TAREA_SUSPENDED){
+					//-- Verificamos si la tarea fue bloqueada por un delay u otra api que no dependa del tiempo
+					//-- en caso que no dependa del tiempo no se debe decrementar su valor.
+					if(task->blocked_by_delay){
+						--task->ticks_bloqueada;
+						if((task->ticks_bloqueada <= 0) && (task->estado == TAREA_BLOCKED))  {
+							task->estado = TAREA_READY;
+							os_setRegBlockedCnt(os_getRegBlockedCnt(task->prioridad)-1,task->prioridad);
 
-				//-- Verificamos si la tarea fue bloqueada por un delay u otra api que no dependa del tiempo
-				//-- en caso que no dependa del tiempo no se debe decrementar su valor.
-				if(task->blocked_by_delay){
-					--task->ticks_bloqueada;
-					if((task->ticks_bloqueada <= 0) && (task->estado == TAREA_BLOCKED))  {
-						task->estado = TAREA_READY;
-						os_setRegBlockedCnt(os_getRegBlockedCnt(task->prioridad)-1,task->prioridad);
-						//control_OS.reg_blocked = control_OS.reg_blocked & (!(i+1));
-						control_OS.reg_blocked = control_OS.reg_blocked & (~(1<<i));
+							control_OS.reg_blocked = control_OS.reg_blocked & (~(1<<i));
+						}
 					}
 				}
 			}
@@ -924,6 +926,40 @@ inline void os_exit_critical()  {
 		__enable_irq();
 	}
 }
-
+/*************************************************************************************************
+	 *  @brief Pone una tarea en estado SUSPENDED, solo si no estaba suspendida previamente.
+	 *  		Por lo cual sucesivos llamados de esta funciòn son ignorados.
+     *
+     *  @details
+     *   Las secciones criticas son aquellas que deben ejecutar operaciones atomicas, es decir que
+     *   no pueden ser interrumpidas. Con llamar a esta funcion, se otorga soporte en el OS
+     *   para marcar un bloque de codigo como atomico
+     *
+	 *  @param 		index Task ID received when the task is initialized.
+	 *  @return     None
+	 *  @see 		os_taskResume
+***************************************************************************************************/
+void os_taskSuspend(uint8_t index){
+	if(control_OS.listaTareas[index]->estado != TAREA_SUSPENDED){
+		control_OS.listaTareas[index]->estado = TAREA_SUSPENDED;
+	}
+}
+/*************************************************************************************************
+	 *  @brief Pone una tarea en estado READY, solo si estaba suspendida previamente.
+	 *  		Por lo cual sucesivos llamados de esta funciòn son ignorados.
+     *
+     *  @details
+     *   Se utiliza para reanudar una tarea. Siempre que se reanuda una tarea esta se pone en estado
+     *   READY, no se tiene en cuenta el estado previo.
+     *
+	 *  @param 		index Task ID received when the task is initialized.
+	 *  @return     None
+	 *  @see 		os_taskSuspend
+***************************************************************************************************/
+void os_taskResume(uint8_t index){
+	if(control_OS.listaTareas[index]->estado == TAREA_SUSPENDED){
+		control_OS.listaTareas[index]->estado = TAREA_READY;
+	}
+}
 
 

@@ -7,7 +7,8 @@
 
 
 #include "../../NF_MSE_OS_V2/inc/MSE_OS_API.h"
-
+#include "board.h"		//-- Solo para debug, comentar si no es necesario
+#include "sapi.h"		//-- Solo para debug, comentar si no es necesario
 
 /*************************************************************************************************
 	 *  @brief delay no preciso en base a ticks del sistema
@@ -27,6 +28,8 @@ void os_Delay(uint32_t ticks)  {
 	 * Esta prohibido llamar esta funcion de API desde un handler, genera un error que
 	 * detiene el OS
 	 */
+
+
 	if(os_getEstadoSistema() == OS_IRQ_RUN)  {
 		os_setError(ERR_OS_DELAY_FROM_ISR,os_Delay);
 	}
@@ -42,6 +45,11 @@ void os_Delay(uint32_t ticks)  {
 
 		os_exit_critical();
 
+		//-- Si la tarea actual esta SUSPENDIDA
+		//-- se ignora el delay
+		if(tarea_actual->estado == TAREA_SUSPENDED){
+			return;
+		}
 		/*
 		 * El proximo bloque while tiene la finalidad de asegurarse que la tarea solo se desbloquee
 		 * en el momento que termine la cuenta de ticks. Si por alguna razon la tarea se vuelve a
@@ -51,7 +59,7 @@ void os_Delay(uint32_t ticks)  {
 		 *
 		 */
 
-		while (tarea_actual->ticks_bloqueada > 0)  {
+		else while (tarea_actual->ticks_bloqueada > 0)  {
 			tarea_actual->estado = TAREA_BLOCKED;
 			os_setRegBlockedCnt(os_getRegBlockedCnt(tarea_actual->prioridad)+1,tarea_actual->prioridad);
 			os_setRegBlocked((1<<(tarea_actual->id)) | os_getRegBlocked());
@@ -133,12 +141,16 @@ void os_DelayUntil(uint32_t ticks, uint32_t init_ticks){
 		//----------------------------------------------------------------------------------------------------
 		os_exit_critical();
 
-
+		//-- Si la tarea actual esta SUSPENDIDA
+		//-- se ignora el delay
+		if(tarea_actual->estado == TAREA_SUSPENDED){
+			return;
+		}
 		//-- El proximo bloque while tiene la finalidad de asegurarse que la tarea solo se desbloquee
 		//-- en el momento que termine la cuenta de ticks.
 		//-- Si el delay no fue necesario ticks_bloqueada sera cero por lo cual es ignorado dicho bloque de
 		//-- de código.
-		while (tarea_actual->ticks_bloqueada > 0)  {
+		else while (tarea_actual->ticks_bloqueada > 0)  {
 			tarea_actual->estado = TAREA_BLOCKED;
 			os_setRegBlockedCnt(os_getRegBlockedCnt(tarea_actual->prioridad)+1,tarea_actual->prioridad);
 			os_setRegBlocked((1<<(tarea_actual->id)) | os_getRegBlocked());
@@ -192,53 +204,119 @@ void os_SemaforoInit(osSemaforo* sem)  {
      *  @details
      *   Esta funcion es utilizada para tomar un semaforo cualquiera.
      *
+     *   ticks_blocked es ignorado si se llama desde una ISR, en este caso solo se hace consulta
+     *   si se puede tomar o no y retorna el valor resultante.
+     *
+     *   ticks_blocked es el tiempo que se mantiene bloqueado el semáforo
+     *
+     *   ticks_blocked es 0: 			se hace polling del semaforo.
+     *   ticks_blocked es negativo: 	se bloquea indefinidamente hasta que la tarea
+     *   								logra tomar el semaforo.
+     *
 	 *  @param		sem		Semaforo a tomar
-	 *  @return     None.
+	 *  @param2   	ticks_blocked  Tiempo que se mantiene bloqueado.
+	 *  @return     true	Si se pudo tomar el semaforo.
+	 *  			false	Si no se pudo tomar el semáforo.
 ***************************************************************************************************/
-void os_SemaforoTake(osSemaforo* sem)  {
+bool os_SemaforoTake(osSemaforo* sem, int32_t ticks_blocked)  {
 	bool Salir = false;
 	tarea* tarea_actual;
 
-	/*
-	 * En el caso de que otra tarea desbloquee por error la tarea que se acaba de
-	 * bloquear con el semaforo (en el caso que este tomado) el bloque while se
-	 * encarga de volver a bloquearla hasta tanto no se haga un give
-	 */
-	while (!Salir)  {
+	if( (os_getEstadoSistema() == OS_IRQ_RUN) || (ticks_blocked == 0 ) ){
+		//-- Si estamos en este bloque significa que la funcionalidad del semaforo es por polling.
+		//-- Por lo cual se consulta el estado del semaforo, se toma si se puede y se retorna el
+		//-- resultado obtenido.
+		if(sem->tomado)  {
+			return false;
+		}
+		else{
+			sem->tomado = true;
+			return true;
+		}
 
-		/*
-		 * Si el semaforo esta tomado, la tarea actual debe bloquearse y se
-		 * mantiene un puntero a la estructura de la tarea actual, la que
-		 * recibe el nombre de tarea asociada. Luego se hace un CPU yield
-		 * dado que no se necesita mas el CPU hasta que se libere el semaforo.
-		 *
-		 * Si el semaforo estaba libre, solamente se marca como tomado y se
-		 * retorna.
-		 *
-		 * Se agrega una seccion critica al momento de obtener la tarea actual e
-		 * interactuar con su estado
-		 */
+	}
+	else if(ticks_blocked > 0){
 		if(sem->tomado)  {
 			os_enter_critical();
 
 			//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 			tarea_actual = os_getTareaActual();
-			tarea_actual->estado = TAREA_BLOCKED;
-			tarea_actual->blocked_by_delay =false;
-			sem->tarea_asociada = tarea_actual;
-			os_setRegBlockedCnt(os_getRegBlockedCnt(sem->tarea_asociada->prioridad)+1,sem->tarea_asociada->prioridad);
-			os_setRegBlocked((1<<tarea_actual->id) | os_getRegBlocked());
+			if(tarea_actual->estado != TAREA_SUSPENDED){
+				tarea_actual->estado = TAREA_BLOCKED;
+				tarea_actual->blocked_by_delay =true;
+				tarea_actual->ticks_bloqueada = ticks_blocked;
+				sem->tarea_asociada = tarea_actual;
+				os_setRegBlockedCnt(os_getRegBlockedCnt(sem->tarea_asociada->prioridad)+1,sem->tarea_asociada->prioridad);
+				os_setRegBlocked((1<<tarea_actual->id) | os_getRegBlocked());
+			}
+
 			//---------------------------------------------------------------------------
 
 			os_exit_critical();
 			os_CpuYield();
+
+
+			//-- Cuando la tarea vuelva a estado RUNNING puede ser por dos situaciones
+			//-- o el contador llego a cero por lo cual no se pudo tomar el semaforo en
+			//-- ese tiempo.
+			//-- o se pudo tomar el semaforo satisfactoriamente dentro del tiempo
+			//-- estipulado.
+			if(tarea_actual->ticks_bloqueada == 0){
+				return false;
+			}
+			else{
+				return true;
+			}
 		}
-		else  {
+		else{
+			//-- El semaforo está libre y puede ser tomado.
 			sem->tomado = true;
-			Salir = true;
+			return true;
 		}
 
 	}
+	else{
+		//-- Si ticks_blocked es menor a 0 indica que el semaforo debe ser esperado
+		//-- indefinidamente hasta que pueda ser tomado.
+		if(sem->tomado)  {
+			os_enter_critical();
+
+			//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+			tarea_actual = os_getTareaActual();
+			if(tarea_actual->estado != TAREA_SUSPENDED){
+				tarea_actual->estado = TAREA_BLOCKED;
+				tarea_actual->blocked_by_delay =false;
+				sem->tarea_asociada = tarea_actual;
+				os_setRegBlockedCnt(os_getRegBlockedCnt(sem->tarea_asociada->prioridad)+1,sem->tarea_asociada->prioridad);
+				os_setRegBlocked((1<<tarea_actual->id) | os_getRegBlocked());
+			}
+			//---------------------------------------------------------------------------
+
+			os_exit_critical();
+			os_CpuYield();
+
+			//-- Luego de desbloquearse la tarea el semaforo puede ser tomado
+			//-- se vuelve a reverificar que se pueda tomar el semaforo para
+			//-- evitar cualquier problema.
+			//-- en este caso es la unica situaciòn donde puede retornar false
+			//-- para un valor de ticks_blocked negativo y sin ser llamado de
+			//-- una ISR.
+			if(sem->tomado){
+				return false;
+			}
+			else{
+				sem->tomado = true;
+				return true;
+			}
+		}
+		else  {
+			sem->tomado = true;
+			return true;
+		}
+
+	}
+
+
 }
 
 
@@ -261,16 +339,28 @@ void os_SemaforoGive(osSemaforo* sem)  {
 	 */
 
 	if (sem->tomado == true &&	sem->tarea_asociada != NULL)  {
-		sem->tomado = false;
-		sem->tarea_asociada->estado = TAREA_READY;
-		os_setRegBlockedCnt(os_getRegBlockedCnt(sem->tarea_asociada->prioridad)-1,sem->tarea_asociada->prioridad);
-		os_setRegBlocked( os_getRegBlocked() & (~(1<<sem->tarea_asociada->id)) );
-		/*
-		 * Si es llamada desde una interrupcion, se debe indicar que es necesario efectuar
-		 * un scheduling, porque seguramente existe una tarea esperando este evento
-		 */
-		if (os_getEstadoSistema() == OS_IRQ_RUN)
-			 os_setScheduleDesdeISR(true);
+		if(sem->tarea_asociada->estado != TAREA_SUSPENDED){
+			os_enter_critical();
+			//-- No se permite la atención de otra interrupción mientras se manipulan
+			//-- las variables del sistema operativo
+			//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+			sem->tomado = false;
+			sem->tarea_asociada->estado = TAREA_READY;
+			os_setRegBlockedCnt(os_getRegBlockedCnt(sem->tarea_asociada->prioridad)-1,sem->tarea_asociada->prioridad);
+			os_setRegBlocked( os_getRegBlocked() & (~(1<<sem->tarea_asociada->id)) );
+
+			//---------------------------------------------------------------------------
+			os_exit_critical();
+
+			//-- Habilitamos el scheduler para que se atienda a la tarea que espera el evento.
+
+			if (os_getEstadoSistema() == OS_IRQ_RUN)
+				 os_setScheduleDesdeISR(true);
+		}
+
+	}
+	else if(sem->tarea_asociada == NULL){
+		os_setError(SEMAPH_HANDLE_NULL,os_SemaforoGive);
 	}
 }
 
@@ -375,11 +465,14 @@ void os_ColaWrite(osCola* cola, void* dato)  {
 
 		//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 		tarea_actual = os_getTareaActual();
-		tarea_actual->estado = TAREA_BLOCKED;
-		tarea_actual->blocked_by_delay =false;
-		cola->tarea_asociada = tarea_actual;
-		os_setRegBlocked(os_getRegBlocked() | (1<<cola->tarea_asociada->id));
-		os_setRegBlockedCnt(os_getRegBlockedCnt(cola->tarea_asociada->prioridad)+1,cola->tarea_asociada->prioridad);
+		if(tarea_actual->estado == TAREA_BLOCKED){
+			tarea_actual->estado = TAREA_BLOCKED;
+			tarea_actual->blocked_by_delay =false;
+			cola->tarea_asociada = tarea_actual;
+			os_setRegBlocked(os_getRegBlocked() | (1<<cola->tarea_asociada->id));
+			os_setRegBlockedCnt(os_getRegBlockedCnt(cola->tarea_asociada->prioridad)+1,cola->tarea_asociada->prioridad);
+		}
+
 		//---------------------------------------------------------------------------
 
 		os_exit_critical();
@@ -406,84 +499,88 @@ void os_ColaRead(osCola* cola, void* dato)  {
 	uint16_t index_t;					//variable para legibilidad
 	tarea* tarea_actual;
 
+	if(cola->tarea_asociada->estado != TAREA_SUSPENDED){
+		index_t = cola->indice_tail * cola->size_elemento;
+		elementos_total = QUEUE_HEAP_SIZE / cola->size_elemento;
 
-	index_t = cola->indice_tail * cola->size_elemento;
-	elementos_total = QUEUE_HEAP_SIZE / cola->size_elemento;
 
-
-	/*
-	 * el primer bloque determina tres cosas, que gracias a la disposicion de los
-	 * parentesis se dan en un orden especifico:
-	 * 1) Se determina si la cola esta llena (head+1)%CANT_ELEMENTOS == tail
-	 * 2) Sobre el resultado de 1) se determina si existe una tarea asociada
-	 * 3) Si la cola esta llena, y el puntero a la tarea asociada es valido, se
-	 * 		verifica si la tarea asociada esta bloqueada
-	 * Estas condiciones en ese orden determinan si se trato de escribir en una cola
-	 * llena y la tarea que quizo escribir se bloqueo porque la misma estaba llena. Como
-	 * seguramente en este punto se lee un dato de la misma, esa tarea tiene que
-	 * pasar a ready
-	 */
-
-	if((( (cola->indice_head + 1) % elementos_total == cola->indice_tail) &&
-			cola->tarea_asociada != NULL) &&
-			cola->tarea_asociada->estado == TAREA_BLOCKED)  {
-
-		cola->tarea_asociada->estado = TAREA_READY;
-		os_setRegBlockedCnt(os_getRegBlockedCnt(cola->tarea_asociada->prioridad)-1,cola->tarea_asociada->prioridad);
-		os_setRegBlocked(os_getRegBlocked() & (~(1<<cola->tarea_asociada->id)));
 		/*
-		 * Si es llamada desde una interrupcion, se debe indicar que es necesario efectuar
-		 * un scheduling, porque seguramente existe una tarea esperando este evento
+		 * el primer bloque determina tres cosas, que gracias a la disposicion de los
+		 * parentesis se dan en un orden especifico:
+		 * 1) Se determina si la cola esta llena (head+1)%CANT_ELEMENTOS == tail
+		 * 2) Sobre el resultado de 1) se determina si existe una tarea asociada
+		 * 3) Si la cola esta llena, y el puntero a la tarea asociada es valido, se
+		 * 		verifica si la tarea asociada esta bloqueada
+		 * Estas condiciones en ese orden determinan si se trato de escribir en una cola
+		 * llena y la tarea que quizo escribir se bloqueo porque la misma estaba llena. Como
+		 * seguramente en este punto se lee un dato de la misma, esa tarea tiene que
+		 * pasar a ready
 		 */
-		if (os_getEstadoSistema() == OS_IRQ_RUN)
-			os_setScheduleDesdeISR(true);
+
+		if((( (cola->indice_head + 1) % elementos_total == cola->indice_tail) &&
+				cola->tarea_asociada != NULL) &&
+				cola->tarea_asociada->estado == TAREA_BLOCKED)  {
+
+			cola->tarea_asociada->estado = TAREA_READY;
+			os_setRegBlockedCnt(os_getRegBlockedCnt(cola->tarea_asociada->prioridad)-1,cola->tarea_asociada->prioridad);
+			os_setRegBlocked(os_getRegBlocked() & (~(1<<cola->tarea_asociada->id)));
+			/*
+			 * Si es llamada desde una interrupcion, se debe indicar que es necesario efectuar
+			 * un scheduling, porque seguramente existe una tarea esperando este evento
+			 */
+			if (os_getEstadoSistema() == OS_IRQ_RUN)
+				os_setScheduleDesdeISR(true);
+		}
+
+
+		/*
+		 * En el caso de que se quiera leer una cola desde un ISR y este
+		 * vacia, la operacion es abortada (no se puede bloquear un handler)
+		 */
+		if (os_getEstadoSistema() == OS_IRQ_RUN && cola->indice_head == cola->indice_tail)  {
+			os_setWarning(WARN_OS_QUEUE_EMPTY_ISR);
+			return;		//operacion abortada
+		}
+
+		/*
+		 * El siguiente bloque while determina que hasta que la cola no tenga un dato
+		 * disponible, no se avance. Si no hay un dato que leer, se bloquea la tarea
+		 * actual que es la que esta tratando de leer un dato y luego se hace un yield
+		 */
+
+		while(cola->indice_head == cola->indice_tail)  {
+			os_enter_critical();
+
+			//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+			tarea_actual = os_getTareaActual();
+			if(tarea_actual->estado != TAREA_SUSPENDED){
+				tarea_actual->estado = TAREA_BLOCKED;
+				tarea_actual->blocked_by_delay =false;
+				cola->tarea_asociada = tarea_actual;
+				os_setRegBlockedCnt(os_getRegBlockedCnt(tarea_actual->prioridad)+1,tarea_actual->prioridad);
+				os_setRegBlocked( os_getRegBlocked() | (1<<cola->tarea_asociada->id));
+			}
+			//---------------------------------------------------------------------------
+
+			os_exit_critical();
+			os_CpuYield();
+		}
+
+		/*
+		 * Si la cola tiene datos, se lee mediante la funcion memcpy que copia un
+		 * bloque completo de memoria iniciando desde la direccion apuntada por el
+		 * primer elemento. Como data es un vector del tipo uint8_t, la aritmetica
+		 * de punteros es byte a byte (consecutivos) y se logra el efecto deseado
+		 * Esto permite guardar datos definidos por el usuario, como ser estructuras
+		 * de datos completas. Luego se actualiza el undice head y se limpia la tarea
+		 * asociada, dado que ese puntero ya no tiene utilidad
+		 */
+
+		memcpy(dato,cola->data+index_t,cola->size_elemento);
+		cola->indice_tail = (cola->indice_tail + 1) % elementos_total;
+		cola->tarea_asociada = NULL;
 	}
 
-
-	/*
-	 * En el caso de que se quiera leer una cola desde un ISR y este
-	 * vacia, la operacion es abortada (no se puede bloquear un handler)
-	 */
-	if (os_getEstadoSistema() == OS_IRQ_RUN && cola->indice_head == cola->indice_tail)  {
-		os_setWarning(WARN_OS_QUEUE_EMPTY_ISR);
-		return;		//operacion abortada
-	}
-
-	/*
-	 * El siguiente bloque while determina que hasta que la cola no tenga un dato
-	 * disponible, no se avance. Si no hay un dato que leer, se bloquea la tarea
-	 * actual que es la que esta tratando de leer un dato y luego se hace un yield
-	 */
-
-	while(cola->indice_head == cola->indice_tail)  {
-		os_enter_critical();
-
-		//!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-		tarea_actual = os_getTareaActual();
-		tarea_actual->estado = TAREA_BLOCKED;
-		tarea_actual->blocked_by_delay =false;
-		cola->tarea_asociada = tarea_actual;
-		os_setRegBlockedCnt(os_getRegBlockedCnt(tarea_actual->prioridad)+1,tarea_actual->prioridad);
-		os_setRegBlocked( os_getRegBlocked() | (1<<cola->tarea_asociada->id));
-		//---------------------------------------------------------------------------
-
-		os_exit_critical();
-		os_CpuYield();
-	}
-
-	/*
-	 * Si la cola tiene datos, se lee mediante la funcion memcpy que copia un
-	 * bloque completo de memoria iniciando desde la direccion apuntada por el
-	 * primer elemento. Como data es un vector del tipo uint8_t, la aritmetica
-	 * de punteros es byte a byte (consecutivos) y se logra el efecto deseado
-	 * Esto permite guardar datos definidos por el usuario, como ser estructuras
-	 * de datos completas. Luego se actualiza el undice head y se limpia la tarea
-	 * asociada, dado que ese puntero ya no tiene utilidad
-	 */
-
-	memcpy(dato,cola->data+index_t,cola->size_elemento);
-	cola->indice_tail = (cola->indice_tail + 1) % elementos_total;
-	cola->tarea_asociada = NULL;
 
 }
 

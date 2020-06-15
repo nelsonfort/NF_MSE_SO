@@ -84,6 +84,7 @@
 #define ERR_OS_VAL_PRIO_TASK    -4
 #define IDLE_NOT_READY_OR_RUN   -5
 #define TASK_PRIO_CNT_OVERFL	-6
+#define SEMAPH_HANDLE_NULL		-7
 
 #define WARN_OS_QUEUE_FULL_ISR	-100
 #define WARN_OS_QUEUE_EMPTY_ISR	-101
@@ -99,7 +100,8 @@
 enum _estadoTarea  {
 	TAREA_READY,
 	TAREA_RUNNING,
-	TAREA_BLOCKED
+	TAREA_BLOCKED,
+	TAREA_SUSPENDED
 };
 
 typedef enum _estadoTarea estadoTarea;
@@ -213,7 +215,7 @@ typedef struct _osControl osControl;
 /*==================[definicion de prototipos]=================================*/
 
 // ------------------------- INITS -------------------------------
-void os_InitTarea(void *entryPoint, tarea *task, uint8_t prioridad);
+uint8_t os_InitTarea(void *entryPoint, tarea *task, uint8_t prioridad);
 void os_Init(void);
 
 // ------------------------- GETS -------------------------------
@@ -238,7 +240,9 @@ void os_CpuYield(void);
 void os_enter_critical(void);
 void os_exit_critical(void);
 
-
+//----------------- TASK SUSPEND / RESUME ----------------------
+void os_taskSuspend(uint8_t index);
+void os_taskResume(uint8_t index);
 
 
 

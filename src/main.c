@@ -89,14 +89,19 @@ void encenderLed(void)  {
 
 	while (1) {
 
-		os_SemaforoTake(&semTecla1_descendente);
-		gpioWrite(LED1,true);
-
-		i = 0;
-		while(msg[i] != NULL)  {
-			os_ColaWrite(&colaUart,(msg + i));
-			i++;
+		if(os_SemaforoTake(&semTecla1_descendente,2000)){
+			gpioWrite(LED1,true);
+			i = 0;
+			while(msg[i] != NULL)  {
+				os_ColaWrite(&colaUart,(msg + i));
+				i++;
+			}
 		}
+		else{
+			gpioWrite(LED2,true);
+			//os_taskResume(3);
+		}
+
 	}
 }
 
@@ -108,14 +113,20 @@ void apagarLed(void)  {
 
 	while (1) {
 
-		os_SemaforoTake(&semTecla1_ascendente);
-		gpioWrite(LED1,false);
-
-		i = 0;
-		while(msg[i] != NULL)  {
-			os_ColaWrite(&colaUart,(msg + i));
-			i++;
+		if(os_SemaforoTake(&semTecla1_ascendente,3000)){
+			gpioWrite(LED1,false);
+			i = 0;
+			while(msg[i] != NULL)  {
+				os_ColaWrite(&colaUart,(msg + i));
+				i++;
+			}
 		}
+		else{
+			gpioWrite(LED2,false);
+			//os_taskSuspend(3);
+		}
+
+
 	}
 }
 
@@ -134,8 +145,8 @@ void blink(void)  {
 
 	while(1)  {
 		gpioToggle(LEDB);
-		for(uint32_t i=0; i<=700000; i++);
-		os_Delay(400);
+		//for(uint32_t i=0; i<=700000; i++);
+		os_Delay(100);
 	}
 }
 void blink_until(void)  {

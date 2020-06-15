@@ -42,7 +42,7 @@ void os_Delay(uint32_t ticks);
 void os_DelayUntil(uint32_t ticks, uint32_t init_ticks);
 
 void os_SemaforoInit(osSemaforo* sem);
-void os_SemaforoTake(osSemaforo* sem);
+bool os_SemaforoTake(osSemaforo* sem, int32_t ticks_blocked);
 void os_SemaforoGive(osSemaforo* sem);
 
 void os_ColaInit(osCola* cola, uint16_t datasize);
