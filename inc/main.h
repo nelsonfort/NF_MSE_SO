@@ -38,7 +38,14 @@
  ** @{ */
 
 /*==================[inclusions]=============================================*/
+#include <stdlib.h>
 
+#include "../../NF_MSE_OS_V2/inc/MSE_OS_API.h"
+#include "../../NF_MSE_OS_V2/inc/MSE_OS_Core.h"
+#include "board.h"
+#include "sapi.h"
+#include <string.h>
+#include "stringManipulation.h"
 /*==================[cplusplus]==============================================*/
 
 #ifdef __cplusplus
@@ -48,7 +55,24 @@ extern "C" {
 /*==================[macros]=================================================*/
 
 /*==================[typedef]================================================*/
+//-- Estructura de datos para el envío de valores por la cola
+typedef struct _TEC_frame{
+	uint8_t tec;
+	uint32_t t_rise;
+	uint32_t t_fall;
+} tec_frame_t;
 
+typedef struct _LED_frame{
+	uint32_t time_on;
+	gpioMap_t ledx;
+} led_frame_t;
+
+typedef struct _DATA_TIME_frame{
+	uint32_t time_on;
+	uint32_t t1;
+	uint32_t t2;
+	gpioMap_t ledx;
+} data_time_frame_t;
 /*==================[external data declaration]==============================*/
 
 /*==================[external functions declaration]=========================*/
